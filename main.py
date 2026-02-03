@@ -90,11 +90,15 @@ def cmd_sync(args, config: Config):
         logger.info("Sync Summary")
         logger.info("=" * 50)
         logger.info(f"Duration: {stats.duration_seconds:.2f}s")
-        logger.info(f"Total processed: {stats.total_processed}")
-        logger.info(f"Created: {stats.created}")
-        logger.info(f"Updated: {stats.updated}")
-        logger.info(f"Deleted: {stats.deleted}")
-        logger.info(f"Failed: {stats.failed}")
+
+        if getattr(stats, 'skipped', False):
+            logger.info("Status: Skipped (no changes detected)")
+        else:
+            logger.info(f"Total processed: {stats.total_processed}")
+            logger.info(f"Created: {stats.created}")
+            logger.info(f"Updated: {stats.updated}")
+            logger.info(f"Deleted: {stats.deleted}")
+            logger.info(f"Failed: {stats.failed}")
 
         if stats.errors:
             logger.warning(f"Errors encountered: {len(stats.errors)}")
@@ -187,6 +191,30 @@ def cmd_get(args, config: Config):
     return 0
 
 
+def cmd_index(args, config: Config):
+    """Get global lightweight index of all assets."""
+    service = initialize_service(config)
+
+    index = service.get_global_index()
+
+    if args.json:
+        import json
+        print(json.dumps(index, ensure_ascii=False, indent=2))
+    else:
+        logger.info(f"Global index: {len(index)} assets")
+        print("-" * 60)
+        for asset_id, data in index.items():
+            print(f"  [{data['category']}] {asset_id}")
+            print(f"      Name: {data['name']}")
+            print(f"      Version: {data['version']}")
+            if data.get('description'):
+                desc = data['description'][:50] + "..." if len(data['description']) > 50 else data['description']
+                print(f"      Description: {desc}")
+            print()
+
+    return 0
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -240,6 +268,14 @@ def main():
     get_parser = subparsers.add_parser("get", help="Get asset details")
     get_parser.add_argument("asset_id", type=str, help="Asset ID")
 
+    # Index command
+    index_parser = subparsers.add_parser("index", help="Get global lightweight index")
+    index_parser.add_argument(
+        "--json", "-j",
+        action="store_true",
+        help="Output as JSON",
+    )
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -260,6 +296,7 @@ def main():
         "health": cmd_health,
         "list": cmd_list,
         "get": cmd_get,
+        "index": cmd_index,
     }
 
     handler = command_handlers.get(args.command)

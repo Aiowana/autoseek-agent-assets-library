@@ -1,4 +1,4 @@
-# Redis Key 命名规范 v1.0
+# Redis Key 命名规范 v1.1
 
 > 本文档定义 Agent 资产库系统在 Redis/Tendis 中的数据存储规范。所有组件必须严格遵循此约定。
 
@@ -88,9 +88,49 @@ SMEMBERS asset:category:tool
 
 ---
 
-## 4. 同步状态管理
+## 4. 全局轻量索引
 
-### 4.1 全局同步状态
+### 4.1 全局索引
+
+```
+Key:    asset:index
+Type:   Hash
+TTL:    永久
+```
+
+**说明：** 存储所有资产的轻量级摘要，用于前端快速列表展示
+
+**字段定义：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 资产 ID |
+| `name` | string | 资产名称 |
+| `category` | string | 资产类别 |
+| `version` | string | 版本号 |
+| `description` | string | 资产描述（截取前 100 字符） |
+
+**示例：**
+```redis
+HSET asset:index \
+  http_search '{"id":"http_search","name":"HTTP 请求工具","category":"tool","version":"1.0.0","description":"发送 HTTP GET/POST 请求"}' \
+  text_summarizer '{"id":"text_summarizer","name":"文本总结","category":"prompt","version":"1.0.0","description":"将长文本总结为简洁的摘要"}'
+```
+
+**查询：** 获取所有资产摘要
+```redis
+HGETALL asset:index
+```
+
+**用途：**
+- 前端列表页一次请求获取所有资产摘要（数据量减少 90%）
+- 详情页按需请求 `asset:metadata:{id}` 获取完整配置
+
+---
+
+## 5. 同步状态管理
+
+### 5.1 全局同步状态
 
 ```
 Key:    asset:sync:state
@@ -103,7 +143,7 @@ TTL:    永久
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `last_sync_time` | timestamp | 上次完整同步的时间戳 |
-| `last_sync_sha` | string | 上次同步时 GitHub 仓库的 commit SHA（可选） |
+| `last_commit_sha` | string | 上次同步时 GitHub 分支的最新 commit SHA |
 | `synced_count` | int | 已同步的资产总数 |
 | `sync_status` | string | 同步状态：`idle` \| `syncing` \| `failed` |
 
@@ -111,12 +151,16 @@ TTL:    永久
 ```redis
 HSET asset:sync:state \
   last_sync_time "1704153600" \
-  last_sync_sha "commit_sha_here" \
+  last_commit_sha "abc123def456..." \
   synced_count "42" \
   sync_status "idle"
 ```
 
-### 4.2 变更记录队列
+**last_commit_sha 的用途：**
+- 增量同步检测：对比当前 commit SHA，如未变化则跳过同步
+- 避免无效扫描：减少 GitHub API 调用
+
+### 5.2 变更记录队列
 
 ```
 Key:    asset:sync:changed
@@ -207,6 +251,7 @@ Type:   Hash
 
 | 版本 | 日期 | 变更说明 |
 |------|------|----------|
+| v1.1 | 2024-02-03 | 添加 `asset:index` 全局轻量索引；`last_sync_sha` 更名为 `last_commit_sha` |
 | v1.0 | 2024-01-01 | 初始版本 |
 
 ---

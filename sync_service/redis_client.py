@@ -31,6 +31,9 @@ class RedisKeys:
     # Category index: asset:category:{category}
     CATEGORY = "asset:category:{}"
 
+    # Global index: asset:index (lightweight asset summary)
+    GLOBAL_INDEX = "asset:index"
+
     # Sync state: asset:sync:state
     SYNC_STATE = "asset:sync:state"
 
@@ -49,6 +52,22 @@ class RedisKeys:
     def make_hash(asset: StoredAsset) -> Dict[str, str]:
         """Convert StoredAsset to Redis hash fields."""
         return asset.to_dict()
+
+    @staticmethod
+    def make_index_entry(asset: StoredAsset) -> str:
+        """
+        Create a lightweight index entry for global index.
+
+        Contains only essential fields for list display.
+        """
+        index_data = {
+            "id": asset.id,
+            "name": asset.name,
+            "category": asset.category,
+            "version": asset.version,
+            "description": asset.description[:100] if asset.description else "",  # Truncate long descriptions
+        }
+        return json.dumps(index_data, ensure_ascii=False)
 
 
 # ============================================================================
@@ -279,6 +298,9 @@ class RedisClient:
             # Add to new category (idempotent)
             self.add_to_category(asset.id, new_category, pipeline)
 
+            # Update global index
+            self.update_global_index(asset, pipeline)
+
             pipeline.execute()
             logger.info(f"Atomically saved asset: {asset.id} (category: {new_category})")
             return True
@@ -312,6 +334,9 @@ class RedisClient:
             # Delete metadata
             self.delete_asset(asset_id, pipeline)
 
+            # Remove from global index
+            self.remove_from_global_index(asset_id, pipeline)
+
             pipeline.execute()
             logger.info(f"Atomically deleted asset: {asset_id}")
             return True
@@ -319,6 +344,86 @@ class RedisClient:
         except redis.RedisError as e:
             logger.error(f"Failed to atomically delete asset {asset_id}: {e}")
             return False
+
+    # ========================================================================
+    # Global Index Operations (Lightweight Asset List)
+    # ========================================================================
+
+    def update_global_index(self, asset: StoredAsset, pipeline: Optional[redis.client.Pipeline] = None) -> bool:
+        """
+        Update global lightweight index for an asset.
+
+        Args:
+            asset: StoredAsset to update in index
+            pipeline: Optional Redis pipeline for atomic operations
+
+        Returns:
+            True if successful
+        """
+        client = pipeline or self.client
+        index_entry = RedisKeys.make_index_entry(asset)
+
+        try:
+            client.hset(RedisKeys.GLOBAL_INDEX, asset.id, index_entry)
+            logger.debug(f"Updated global index for: {asset.id}")
+            return True
+        except redis.RedisError as e:
+            logger.error(f"Failed to update global index for {asset.id}: {e}")
+            return False
+
+    def remove_from_global_index(self, asset_id: str, pipeline: Optional[redis.client.Pipeline] = None) -> bool:
+        """
+        Remove asset from global index.
+
+        Args:
+            asset_id: Asset identifier
+            pipeline: Optional Redis pipeline for atomic operations
+
+        Returns:
+            True if successful
+        """
+        client = pipeline or self.client
+
+        try:
+            client.hdel(RedisKeys.GLOBAL_INDEX, asset_id)
+            logger.debug(f"Removed {asset_id} from global index")
+            return True
+        except redis.RedisError as e:
+            logger.error(f"Failed to remove {asset_id} from global index: {e}")
+            return False
+
+    def get_global_index(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get all assets from global lightweight index.
+
+        Returns:
+            Dictionary mapping asset_id to index data
+            {
+                "asset_id": {"id": "...", "name": "...", "category": "...", "version": "...", "description": "..."}
+            }
+        """
+        try:
+            data = self.client.hgetall(RedisKeys.GLOBAL_INDEX)
+            return {k: json.loads(v) for k, v in data.items()}
+        except redis.RedisError as e:
+            logger.error(f"Failed to get global index: {e}")
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse global index data: {e}")
+            return {}
+
+    def get_all_asset_ids(self) -> List[str]:
+        """
+        Get all asset IDs from global index.
+
+        Returns:
+            List of asset IDs
+        """
+        try:
+            return list(self.client.hkeys(RedisKeys.GLOBAL_INDEX))
+        except redis.RedisError as e:
+            logger.error(f"Failed to get asset IDs from global index: {e}")
+            return []
 
     # ========================================================================
     # Sync State Operations
@@ -359,6 +464,28 @@ class RedisClient:
     def set_last_sync_time(self, timestamp: int) -> bool:
         """Update last sync timestamp."""
         return self.set_sync_state(last_sync_time=str(timestamp))
+
+    def get_last_commit_sha(self) -> Optional[str]:
+        """
+        Get last synced commit SHA.
+
+        Returns:
+            Commit SHA string or None if not set
+        """
+        state = self.get_sync_state()
+        return state.get("last_commit_sha")
+
+    def set_last_commit_sha(self, sha: str) -> bool:
+        """
+        Update last synced commit SHA.
+
+        Args:
+            sha: GitHub commit SHA
+
+        Returns:
+            True if successful
+        """
+        return self.set_sync_state(last_commit_sha=sha)
 
     def get_sync_status(self) -> str:
         """Get current sync status."""

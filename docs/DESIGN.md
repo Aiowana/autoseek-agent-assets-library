@@ -1,66 +1,110 @@
-为了回应你关于“一个工具一个 YAML 太重”以及“数据一致性”的担忧，这份修改文档专门针对**架构优化**和**同步机制**进行了升级。
+这份设计文档是基于你提供的 `TECHNICAL_GUIDE.md` 进行的**架构升级版 (v1.1)**。它专门针对“减重”（性能优化）和“一致性”进行了增强。
 
-你可以直接将此文档发给 Claude，它会引导 Claude 从“简单同步”转向“高性能、高一致性”的系统设计。
-
----
-
-# 架构优化与一致性方案修改手册 (v1.1)
-
-## 1. 核心问题对策：解决“资产太重”
-为了避免前端频繁读取大量零散的 YAML 文件，我们将引入 **“二级数据结构”** 策略：
-*   **物理层 (GitHub)**：保持“一工具一文件夹一 YAML”的原子性。这有利于分布式开发、版本控制和按需加载。
-*   **视图层 (Redis Index)**：同步服务在处理完零散 YAML 后，在 Redis 中自动生成一个**全局索引 (Global Index)**。前端只需请求一次索引，即可获得所有资产的摘要（如 ID、名称、图标）。
-
-## 2. 一致性保障协议 (Consistency Protocol)
-为了确保 GitHub (事实来源) 与 Redis (运行缓存) 之间的数据同步，系统需遵循以下逻辑：
-
-### 2.1 增量同步机制 (Delta Sync)
-*   **Commit SHA 追踪**：Redis 中存储 `assets:sync:last_commit`。
-*   **逻辑**：同步前先获取 GitHub 仓库的最新的 Commit SHA。
-    *   如果 SHA 未变，直接跳过扫描（极速）。
-    *   如果 SHA 发生变化，通过 GitHub API 获取差异文件 (Diff)，仅更新变动的文件夹。
-
-### 2.2 双向写入的一致性 (Write-Back Logic)
-当用户在 Web UI 修改配置并保存时，采取“两阶段提交”逻辑：
-1.  **锁定与写回**：后端调用 GitHub API 提交更新。
-2.  **异步确权**：GitHub 返回成功（包含新的 Commit SHA）后，后端更新 Redis 中的数据并更新 `last_commit` 标记。
-3.  **防冲突**：使用 GitHub API 的 `SHA` 校验功能，确保在写入时文件未被他人修改（类似乐观锁）。
+你可以直接将此文档发给 Claude，作为它的**开发迭代任务书**。
 
 ---
 
-## 3. Redis 数据结构优化建议
-请 Claude 在编写代码时采用以下存储设计：
+# Agent 资产库同步服务升级提案 (v1.1) - 减重与一致性强化
 
-*   **`asset:index` (Hash)**: 存储所有资产的简要信息。
-    *   `Field`: `asset_id`
-    *   `Value`: `{ "name": "...", "category": "...", "version": "..." }` (JSON 字符串)
-*   **`asset:metadata:{id}` (String)**: 存储该资产完整的 YAML 解析内容。
-*   **`asset:sync:status` (Hash)**:
-    *   `last_commit`: 最近一次同步的 GitHub Commit SHA。
-    *   `last_sync_time`: 时间戳。
+## 1. 升级背景
+在 v1.0 架构中，随着资产数量增加（如超过 100+ 个工具），前端一次性拉取所有详细元数据会导致性能下降。同时，双向同步（GitHub ↔ Redis）在并发场景下存在数据覆盖风险。本设计旨在通过“二级索引”与“乐观锁机制”解决上述问题。
 
 ---
 
-## 4. 给 Claude 的具体修改指令
+## 2. 优化策略一：减重（二级数据结构）
 
-**“你好 Claude，针对之前的资产库设计，我们需要在同步逻辑和一致性上进行深度优化，请按以下要求修改代码实现：”**
+### 2.1 现状与痛点
+*   **现状**：前端调用接口时，系统从 Redis 返回所有资产的完整 `manifest.yaml` 解析内容。
+*   **痛点**：数据量大，解析慢，消耗带宽。
 
-1.  **实现增量同步**：
-    - 请在 `GitHubManager` 中增加检测 Commit SHA 的功能。
-    - 仅在 GitHub 有新提交时才触发扫描。
-2.  **建立全局索引**：
-    - 在同步过程中，除了存储单个资产的详细元数据，请自动维护一个名为 `asset:index` 的 Redis Hash，供前端快速拉取列表。
-3.  **强化反向写入**：
-    - 在执行 `save_to_github` 时，必须包含对 GitHub 文件原始 SHA 的校验，防止并发覆盖。
-    - 写入成功后，立即更新 Redis 中的本地缓存，确保前端看到的是最新状态。
-4.  **一致性校验脚本**：
-    - 提供一个辅助函数 `check_integrity()`，通过对比 Redis 索引和 GitHub 文件树，发现并修复潜在的孤儿数据（即 GitHub 已删但 Redis 还留存的数据）。
+### 2.2 解决方案：全局轻量索引 (Global Index)
+在 Redis 中引入一个新的数据结构，专门用于列表展示。
+
+**新 Redis 结构：**
+```
+Key: asset:index
+Type: Hash
+Fields:
+  ├─ {asset_id_1}: "{'name': '...', 'category': '...', 'version': '...', 'icon': '...'}"
+  ├─ {asset_id_2}: "{'name': '...', 'category': '...', 'version': '...', 'icon': '...'}"
+```
+
+**逻辑逻辑：**
+- **同步服务**：在同步每个资产时，提取 `name`, `category`, `version` 等关键字段，组成一个极简 JSON，存入 `asset:index`。
+- **前端请求**：
+    1.  **列表页**：仅请求 `asset:index`。数据量减少 90%。
+    2.  **详情页**：当用户点击具体资产时，再根据 ID 请求 `asset:metadata:{id}` 获取完整配置。
 
 ---
 
-### Claude 收到此文档后将明白：
-*   他需要写的不是一个简单的“拷贝”程序，而是一个具备**状态感知**能力的同步引擎。
-*   系统必须通过 **Global Index** 解决“文件太碎”导致的性能问题。
-*   **数据一致性**是架构的生命线，必须通过 Commit SHA 和乐观锁来捍卫。
+## 3. 优化策略二：一致性（增量同步与乐观锁）
 
-**你现在可以把这份修改手册发给 Claude，让他开始重构同步服务的代码逻辑了。**
+### 3.1 增量同步逻辑 (SHA 追踪)
+避免每次轮询都全量扫描 GitHub。
+
+**操作流程：**
+1.  **记录状态**：在 Redis `asset:sync:state` 中增加字段 `last_commit_sha`。
+2.  **前置检查**：同步开始前，调用 GitHub API 获取当前分支最新的 `Commit SHA`。
+3.  **比对**：
+    - 如果 `current_sha == last_commit_sha`，说明仓库无任何变动，直接结束同步。
+    - 如果不同，仅拉取发生变更的文件（使用 GitHub `/compare` 接口）或执行全量扫描后更新 SHA。
+
+### 3.2 写入一致性：乐观锁 (Optimistic Locking)
+防止 UI 端的修改覆盖了 GitHub 端刚发生的更新。
+
+**操作流程：**
+1.  **读取阶段**：前端加载资产时，必须同时获取该文件在 GitHub 的 `sha` 值。
+2.  **修改阶段**：用户提交修改。
+3.  **写入阶段**：
+    - 调用 `github_manager.save_to_github()` 时，必须传入获取到的 `old_sha`。
+    - GitHub API 会自动比对。如果 `old_sha` 与服务器当前 SHA 不一致（说明有人捷足先登改了代码），API 会报错。
+    - **报错处理**：系统提示用户：“资产已被他人更新，请刷新后重试”。
+
+---
+
+## 4. 改进后的数据结构定义
+
+### 4.1 Redis 存储结构更新
+
+| Key | 类型 | 描述 |
+| :--- | :--- | :--- |
+| **`asset:index`** | **Hash** | **[新增]** 极简索引。Field: ID, Value: 摘要 JSON |
+| `asset:metadata:{id}` | Hash | 详情。增加字段 `github_sha` 存储文件哈希 |
+| `asset:sync:state` | Hash | 状态。增加字段 `last_commit_sha` 记录上次同步节点 |
+
+---
+
+## 5. 组件修改指南 (面向 Claude 的开发任务)
+
+### 5.1 修改 `RedisClient`
+- **任务**：实现 `update_index(asset_data)` 方法。在 `save_asset_atomic` 的 pipeline 中同步更新 `asset:index`。
+- **任务**：实现 `get_index()` 方法，供后端 API 调用，返回所有资产的轻量级列表。
+
+### 5.2 修改 `GitHubManager`
+- **任务**：在 `save_to_github` 方法中增加 `sha` 参数支持。
+- **任务**：封装 `check_repo_update()` 方法，通过对比 `last_commit_sha` 决定是否需要执行同步。
+
+### 5.3 修改 `AssetSyncService`
+- **任务**：重写 `sync_from_github` 逻辑。
+    1. 获取最新 Commit SHA 并比对。
+    2. 执行扫描。
+    3. 同步完成后，原子性地更新元数据、索引和新的 `last_commit_sha`。
+- **任务**：增加 `cleanup_orphans()` 逻辑。如果 Redis 索引中有的 ID 在 GitHub 中再也找不到了（被删除了），则从索引和元数据中同步清除。
+
+---
+
+## 6. 给 Claude 的具体 Prompt 示例
+
+> “你好 Claude，基于现有的 `TECHNICAL_GUIDE.md`，请执行以下架构升级：
+> 1. **实现‘减重’方案**：在 Redis 中引入 `asset:index` 结构，存储资产的摘要信息（ID, Name, Category, Version），并在同步时自动维护该索引。
+> 2. **实现增量同步检测**：通过追踪 GitHub 分支的最新 `Commit SHA` 来避免无效的重复扫描。
+> 3. **实现写入一致性**：在 `save_to_github` 方法中引入 GitHub 文件 SHA 校验，确保用户在 Web UI 上的修改不会发生覆盖冲突。
+> 4. **清理逻辑**：确保当 GitHub 端的文件夹被彻底删除时，Redis 中的索引和元数据能被同步移除。
+> 请先从 Redis 索引维护和 Commit SHA 校验的逻辑开始实现。”
+
+---
+
+### 评价建议：
+这份文档通过 **`asset:index`** 解决了前端的性能负担（减重），通过 **`last_commit_sha`** 和 **`github_sha`** 解决了数据同步和并发冲突的隐患（一致性）。
+
+**你现在就可以把这个“架构升级手册”发给 Claude 了。** 这样它写出来的代码不仅能跑通，而且具备了处理真实复杂业务的能力。

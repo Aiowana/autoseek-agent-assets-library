@@ -7,7 +7,7 @@ Orchestrates the sync process between GitHub and Redis.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from sync_service.config import Config, SyncConfig
 from sync_service.github_manager import GitHubManager, Asset
@@ -32,6 +32,7 @@ class SyncStats:
     updated: int = 0
     deleted: int = 0
     failed: int = 0
+    skipped: bool = False
     errors: List[str] = field(default_factory=list)
 
     @property
@@ -50,6 +51,7 @@ class SyncStats:
             "updated": self.updated,
             "deleted": self.deleted,
             "failed": self.failed,
+            "skipped": self.skipped,
             "errors": self.errors[:10],  # Limit to first 10 errors
         }
 
@@ -106,6 +108,19 @@ class AssetSyncService:
         import time
 
         stats = SyncStats(start_time=time.time())
+
+        # Get current commit SHA before syncing
+        current_commit_sha = self.github.get_latest_commit_sha()
+        last_commit_sha = self.redis.get_last_commit_sha()
+
+        # Skip if no changes (commit SHA unchanged)
+        if current_commit_sha and current_commit_sha == last_commit_sha:
+            logger.info("No changes detected (commit SHA unchanged), skipping sync")
+            stats.end_time = time.time()
+            stats.skipped = True
+            return stats
+
+        logger.info(f"Commit SHA changed: {last_commit_sha} -> {current_commit_sha}")
 
         # Set sync status
         self.redis.set_sync_status("syncing")
@@ -170,11 +185,16 @@ class AssetSyncService:
                     except Exception as e:
                         stats.errors.append(f"Failed to delete {asset_id}: {e}")
 
-            # Update sync state
+            # Update sync state including commit SHA
             now = int(time.time())
             self.redis.set_last_sync_time(now)
             self.redis.set_sync_state(synced_count=str(len(github_ids)))
             self.redis.trim_changed_assets(keep=1000)
+
+            # Update commit SHA after successful sync
+            if current_commit_sha:
+                self.redis.set_last_commit_sha(current_commit_sha)
+                logger.info(f"Updated last_commit_sha to: {current_commit_sha}")
 
             logger.info(f"Sync completed: {stats.created} created, {stats.updated} updated, {stats.deleted} deleted")
 
@@ -221,7 +241,10 @@ class AssetSyncService:
 
     def incremental_sync(self) -> SyncStats:
         """
-        Perform incremental sync based on changes since last sync.
+        Perform incremental sync based on commit SHA changes.
+
+        This method checks if the GitHub repository's latest commit SHA
+        has changed since the last sync. If unchanged, it skips the sync.
 
         Returns:
             SyncStats with operation results
@@ -230,22 +253,24 @@ class AssetSyncService:
 
         stats = SyncStats(start_time=time.time())
 
-        last_sync = self.redis.get_last_sync_time()
-        if last_sync is None:
-            logger.info("No previous sync found, performing full sync")
+        # Get commit SHAs
+        current_commit_sha = self.github.get_latest_commit_sha()
+        last_commit_sha = self.redis.get_last_commit_sha()
+
+        # No previous sync, perform full sync
+        if last_commit_sha is None:
+            logger.info("No previous sync found (no last_commit_sha), performing full sync")
             return self.sync_from_github()
 
-        logger.info(f"Performing incremental sync since {datetime.fromtimestamp(last_sync)}")
-
-        # Get commits since last sync
-        commits = self.github.get_commits_since(last_sync)
-
-        if not commits:
-            logger.info("No new commits since last sync")
+        # Commit SHA unchanged - nothing to sync
+        if current_commit_sha == last_commit_sha:
+            logger.info(f"No changes detected (commit SHA: {current_commit_sha}), skipping sync")
             stats.end_time = time.time()
+            stats.skipped = True
             return stats
 
-        logger.info(f"Found {len(commits)} new commits, performing sync")
+        # Commit SHA changed - sync needed
+        logger.info(f"Commit SHA changed: {last_commit_sha} -> {current_commit_sha}, performing sync")
         return self.sync_from_github()
 
     # ========================================================================
@@ -428,6 +453,24 @@ class AssetSyncService:
             if asset:
                 assets.append(asset)
         return assets
+
+    def get_global_index(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get global lightweight index of all assets.
+
+        Returns:
+            Dictionary mapping asset_id to lightweight summary
+            {
+                "asset_id": {
+                    "id": "...",
+                    "name": "...",
+                    "category": "...",
+                    "version": "...",
+                    "description": "..."
+                }
+            }
+        """
+        return self.redis.get_global_index()
 
     def list_categories(self) -> List[str]:
         """List all available categories."""
