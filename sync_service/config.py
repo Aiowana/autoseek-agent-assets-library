@@ -150,11 +150,7 @@ class Config:
         )
 
     def setup_logging(self) -> None:
-        """Configure logging based on settings."""
-        import logging
+        """Configure logging with colored output based on settings."""
+        from sync_service.logger import setup_logging
 
-        level = getattr(logging, self.logging.level.upper(), logging.INFO)
-        logging.basicConfig(
-            level=level,
-            format=self.logging.format,
-        )
+        setup_logging(level=self.logging.level)

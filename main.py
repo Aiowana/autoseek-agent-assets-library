@@ -9,29 +9,28 @@ Usage:
     # Continuous sync with polling
     python main.py sync --continuous
 
-    # Create a new asset
-    python main.py create <manifest.yaml>
-
     # Health check
     python main.py health
 
-    # Server mode (future: HTTP API)
-    python main.py server
+    # List assets
+    python main.py list
+
+    # Get asset details
+    python main.py get <asset_id>
+
+    # View global index
+    python main.py index
 """
 
 import argparse
-import logging
 import sys
 from pathlib import Path
 
-from sync_service import Config, RedisClient, GitHubManager, ManifestValidator, AssetSyncService
+from sync_service import Config, setup_logging, RedisClient, GitHubManager, ManifestValidator, AssetSyncService
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+# Setup colored logging
+setup_logging(level="INFO")
+logger = None  # Will be initialized after config loading
 
 
 # ============================================================================
@@ -41,13 +40,23 @@ logger = logging.getLogger(__name__)
 def load_config(config_path: str = None) -> Config:
     """Load configuration from file or environment variables."""
     if config_path and Path(config_path).exists():
-        logger.info(f"Loading configuration from: {config_path}")
         config = Config.from_yaml(config_path)
     else:
-        logger.info("Loading configuration from environment variables")
         config = Config.from_env()
 
+    # Setup logging with configured level
     config.setup_logging()
+
+    # Re-import logger after setup
+    import logging
+    global logger
+    logger = logging.getLogger(__name__)
+
+    if config_path and Path(config_path).exists():
+        logger.info(f"Loading configuration from: {config_path}")
+    else:
+        logger.info("Loading configuration from environment variables")
+
     return config
 
 
