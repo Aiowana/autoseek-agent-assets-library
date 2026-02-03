@@ -1,0 +1,27 @@
+# Redis Configuration
+redis:
+  host: "localhost"
+  port: 6379
+  password: null
+  db: 0
+  decode_responses: true
+
+# GitHub Configuration
+github:
+  token: ""  # GitHub Personal Access Token
+  repo: "owner/repository"  # e.g., "autoseek/agent-assets-library"
+  branch: "main"
+  base_path: ""  # Empty for root, or "assets" for subdirectory
+
+# Sync Configuration
+sync:
+  interval_seconds: 300  # Poll every 5 minutes
+  batch_size: 100  # Process assets in batches
+  enable_incremental: true  # Use incremental sync via GitHub API
+  max_retries: 3
+  retry_delay: 5
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

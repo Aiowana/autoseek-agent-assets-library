@@ -1,0 +1,57 @@
+# =========================================================
+# 1. 基础元数据 (Essential Metadata)
+# =========================================================
+id: "unique_asset_identity"    # 资产唯一标识（建议：小写字母、数字、下划线）
+version: "1.0.0"               # 语义化版本号 (Semantic Versioning)
+category: "tool"               # 类别枚举：tool, prompt, skill
+name: "Display Name"           # 前端界面显示的资产名称
+description: "Brief summary"   # 资产功能简述
+author: "Author Name"          # 作者/组织名称
+
+# =========================================================
+# 2. 前端动态表单定义 (Config Schema)
+# 用于：前端自动生成用户配置界面。用户填写的私有数据将存入数据库并在运行时注入。
+# =========================================================
+config_schema:
+  - name: "config_key_name"    # 变量名：用户输入的数据将以此为 Key
+    label: "Field Label"       # 界面显示的标签名
+    type: "string"             # 类型枚举：string, number, select, secret, boolean
+    required: true             # 是否必填
+    default: null              # 默认值
+    placeholder: "Hint text"   # 输入框占位提示
+    # options:                 # 仅当 type 为 select 时有效
+    #   - { label: "Option A", value: "A" }
+    #   - { label: "Option B", value: "B" }
+
+# =========================================================
+# 3. 大模型交互协议 (Agent Specs)
+# 用于：告知大模型（LLM）该资产的功能及调用参数（符合 Function Calling 标准）。
+# =========================================================
+agent_specs:
+  function_name: "call_name"   # 模型内部调用的函数标识
+  description: "LLM instructions" # 核心：告知模型在何种场景下调用此资产
+  parameters:                  # 参数定义，遵循 JSON Schema 标准
+    type: "object"
+    properties:
+      input_param:             # AI 运行时需要生成的参数名
+        type: "string"         # 类型：string, integer, boolean
+        description: "Instruction for LLM on this parameter"
+    required: ["input_param"]  # 模型必须生成的参数列表
+
+# =========================================================
+# 4. 运行时加载配置 (Runtime)
+# 用于：Runner 启动后动态定位、安装并加载执行代码。
+# =========================================================
+runtime:
+  language: "python"           # 编程语言：目前主打 python
+  entry: "main.py"             # 代码入口文件相对于资产根目录的路径
+  handler: "main_handler"      # 入口文件内被调用的具体函数或类名
+  dependencies: []             # 运行所需的第三方库列表 (pip install 列表)
+
+# =========================================================
+# 5. 权限控制 (Permissions)
+# 用于：TKE 环境对该资产的运行权限进行沙箱限制。
+# =========================================================
+permissions:
+  network_access: true         # 是否允许访问互联网
+  filesystem_read: false       # 是否允许读取容器本地文件

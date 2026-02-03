@@ -1,0 +1,95 @@
+# =========================================================
+# 基础元数据
+# =========================================================
+id: "http_request"
+version: "1.0.0"
+category: "tool"
+name: "HTTP 请求工具"
+description: "发送 HTTP GET/POST 请求，获取响应内容"
+author: "AutoSeek Team"
+
+# =========================================================
+# 前端动态表单定义
+# =========================================================
+config_schema:
+  - name: "url"
+    label: "请求 URL"
+    type: "string"
+    required: true
+    placeholder: "https://api.example.com/data"
+    default: null
+
+  - name: "method"
+    label: "请求方法"
+    type: "select"
+    required: false
+    default: "GET"
+    options:
+      - { label: "GET", value: "GET" }
+      - { label: "POST", value: "POST" }
+      - { label: "PUT", value: "PUT" }
+      - { label: "DELETE", value: "DELETE" }
+
+  - name: "headers"
+    label: "请求头 (JSON)"
+    type: "string"
+    required: false
+    placeholder: '{"Authorization": "Bearer token"}'
+    default: null
+
+  - name: "body"
+    label: "请求体 (JSON)"
+    type: "string"
+    required: false
+    placeholder: '{"key": "value"}'
+    default: null
+
+  - name: "timeout"
+    label: "超时时间 (秒)"
+    type: "number"
+    required: false
+    default: 30
+
+# =========================================================
+# 大模型交互协议
+# =========================================================
+agent_specs:
+  function_name: "http_request"
+  description: "发送 HTTP 请求获取远程数据，支持 GET/POST/PUT/DELETE 方法。当用户需要调用 API 或获取网页内容时使用此工具。"
+  parameters:
+    type: "object"
+    properties:
+      url:
+        type: "string"
+        description: "请求的完整 URL 地址"
+      method:
+        type: "string"
+        enum: ["GET", "POST", "PUT", "DELETE"]
+        description: "HTTP 请求方法，默认 GET"
+      headers:
+        type: "string"
+        description: "JSON 格式的请求头，例如 {\"Authorization\": \"Bearer token\"}"
+      body:
+        type: "string"
+        description: "JSON 格式的请求体，用于 POST/PUT 请求"
+      timeout:
+        type: "number"
+        description: "请求超时时间（秒），默认 30"
+    required: ["url"]
+
+# =========================================================
+# 运行时配置
+# =========================================================
+runtime:
+  language: "python"
+  entry: "handler.py"
+  handler: "run"
+  dependencies:
+    - "requests>=2.31.0"
+
+# =========================================================
+# 权限控制
+# =========================================================
+permissions:
+  network_access: true
+  filesystem_read: false

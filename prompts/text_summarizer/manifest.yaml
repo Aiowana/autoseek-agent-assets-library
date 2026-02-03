@@ -1,0 +1,92 @@
+# =========================================================
+# 基础元数据
+# =========================================================
+id: "text_summarizer"
+version: "1.0.0"
+category: "prompt"
+name: "文本总结"
+description: "将长文本总结为简洁的摘要，支持中英文"
+author: "AutoSeek Team"
+
+# =========================================================
+# 前端动态表单定义
+# =========================================================
+config_schema:
+  - name: "max_length"
+    label: "摘要最大长度"
+    type: "number"
+    required: false
+    default: 200
+    description: "摘要的最大字符数"
+
+  - name: "style"
+    label: "总结风格"
+    type: "select"
+    required: false
+    default: "concise"
+    options:
+      - { label: "简洁", value: "concise" }
+      - { label: "详细", value: "detailed" }
+      - { label: "要点列表", value: "bullet_points" }
+
+  - name: "language"
+    label: "输出语言"
+    type: "select"
+    required: false
+    default: "auto"
+    options:
+      - { label: "自动检测", value: "auto" }
+      - { label: "中文", value: "zh" }
+      - { label: "英文", value: "en" }
+
+  - name: "focus_keywords"
+    label: "重点关注关键词"
+    type: "string"
+    required: false
+    placeholder: "关键词1, 关键词2"
+    default: null
+    description: "在总结中重点关注的关键词，用逗号分隔"
+
+# =========================================================
+# 大模型交互协议
+# =========================================================
+agent_specs:
+  function_name: "summarize_text"
+  description: "将用户提供的长文本总结为简洁的摘要。适用于文章、报告、邮件等文本内容的快速摘要。"
+  parameters:
+    type: "object"
+    properties:
+      text:
+        type: "string"
+        description: "需要总结的原始文本内容"
+      max_length:
+        type: "number"
+        description: "摘要的最大字符数，默认 200"
+      style:
+        type: "string"
+        enum: ["concise", "detailed", "bullet_points"]
+        description: "总结风格：concise(简洁)、detailed(详细)、bullet_points(要点列表)"
+      language:
+        type: "string"
+        enum: ["auto", "zh", "en"]
+        description: "输出语言：auto(自动检测)、zh(中文)、en(英文)"
+      focus_keywords:
+        type: "string"
+        description: "需要重点关注的关键词，用逗号分隔"
+    required: ["text"]
+
+# =========================================================
+# 运行时配置 (Prompt 类型不需要代码)
+# =========================================================
+runtime:
+  language: "none"
+  entry: ""
+  handler: ""
+  dependencies: []
+
+# =========================================================
+# 权限控制
+# =========================================================
+permissions:
+  network_access: false
+  filesystem_read: false

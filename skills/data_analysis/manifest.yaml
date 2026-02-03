@@ -1,0 +1,106 @@
+# =========================================================
+# 基础元数据
+# =========================================================
+id: "data_analysis"
+version: "1.0.0"
+category: "skill"
+name: "数据分析助手"
+description: "对结构化数据进行统计分析，生成报告和可视化建议"
+author: "AutoSeek Team"
+
+# =========================================================
+# 前端动态表单定义
+# =========================================================
+config_schema:
+  - name: "analysis_type"
+    label: "分析类型"
+    type: "select"
+    required: true
+    default: "descriptive"
+    options:
+      - { label: "描述性统计", value: "descriptive" }
+      - { label: "趋势分析", value: "trend" }
+      - { label: "相关性分析", value: "correlation" }
+      - { label: "异常检测", value: "outlier" }
+
+  - name: "data_format"
+    label: "数据格式"
+    type: "select"
+    required: true
+    default: "json"
+    options:
+      - { label: "JSON", value: "json" }
+      - { label: "CSV", value: "csv" }
+
+  - name: "target_column"
+    label: "目标列名"
+    type: "string"
+    required: false
+    placeholder: "price, quantity, etc."
+    default: null
+    description: "指定要分析的数据列名"
+
+  - name: "group_by"
+    label: "分组字段"
+    type: "string"
+    required: false
+    placeholder: "category, date, etc."
+    default: null
+    description: "用于分组聚合的字段"
+
+  - name: "include_charts"
+    label: "生成图表配置"
+    type: "boolean"
+    required: false
+    default: true
+    description: "是否包含图表生成配置（ECharts/Plotly JSON）"
+
+# =========================================================
+# 大模型交互协议
+# =========================================================
+agent_specs:
+  function_name: "analyze_data"
+  description: "对结构化数据进行统计分析。支持描述性统计、趋势分析、相关性分析和异常检测。适用于业务数据、日志数据、实验数据等场景。"
+  parameters:
+    type: "object"
+    properties:
+      data:
+        type: "string"
+        description: "待分析的数据，JSON 或 CSV 格式字符串"
+      analysis_type:
+        type: "string"
+        enum: ["descriptive", "trend", "correlation", "outlier"]
+        description: "分析类型：descriptive(描述性统计)、trend(趋势分析)、correlation(相关性)、outlier(异常检测)"
+      data_format:
+        type: "string"
+        enum: ["json", "csv"]
+        description: "数据格式：json 或 csv"
+      target_column:
+        type: "string"
+        description: "指定要分析的列名"
+      group_by:
+        type: "string"
+        description: "分组字段，用于分组统计"
+      include_charts:
+        type: "boolean"
+        description: "是否包含图表配置"
+    required: ["data", "analysis_type", "data_format"]
+
+# =========================================================
+# 运行时配置
+# =========================================================
+runtime:
+  language: "python"
+  entry: "handler.py"
+  handler: "run"
+  dependencies:
+    - "pandas>=2.0.0"
+    - "numpy>=1.24.0"
+    - "scipy>=1.10.0"
+
+# =========================================================
+# 权限控制
+# =========================================================
+permissions:
+  network_access: false
+  filesystem_read: false
