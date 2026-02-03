@@ -153,14 +153,13 @@ python main.py get <asset_id>
 
 | 文档 | 说明 |
 |------|------|
-| [README.md](README.md) | 项目说明和快速开始 |
-| [TECHNICAL_GUIDE.md](TECHNICAL_GUIDE.md) | 技术详解，包含架构、流程、API |
-| [REDIS_KEY_CONVENTION.md](REDIS_KEY_CONVENTION.md) | Redis Key 命名规范 |
-| [DESIGN.md](DESIGN.md) | 设计文档 |
+| [TECHNICAL_GUIDE.md](docs/TECHNICAL_GUIDE.md) | 技术详解，包含架构、流程、API |
+| [REDIS_KEY_CONVENTION.md](docs/REDIS_KEY_CONVENTION.md) | Redis Key 命名规范 |
+| [DESIGN.md](docs/DESIGN.md) | 设计文档 |
 
 ## Redis 数据结构
 
-详见 [REDIS_KEY_CONVENTION.md](REDIS_KEY_CONVENTION.md)
+详见 [REDIS_KEY_CONVENTION.md](docs/REDIS_KEY_CONVENTION.md)
 
 ```
 asset:metadata:{id}          # Hash: 资产元数据
@@ -185,9 +184,13 @@ asset:sync:changed           # List: 变更记录
 │   ├── schema.py            # JSON Schema 校验
 │   ├── github_manager.py    # GitHub API 封装
 │   └── sync_service.py      # 主同步逻辑
-├── DESIGN.md                # 设计文档
-├── REDIS_KEY_CONVENTION.md  # Redis Key 规范
-├── TECHNICAL_GUIDE.md       # 技术详解
+├── tools/                   # 工具类资产示例
+├── prompts/                 # Prompt 类资产示例
+├── skills/                  # 技能类资产示例
+├── docs/                    # 文档目录
+│   ├── DESIGN.md            # 设计文档
+│   ├── REDIS_KEY_CONVENTION.md  # Redis Key 规范
+│   └── TECHNICAL_GUIDE.md   # 技术详解
 └── README.md                # 本文档
 ```
 
