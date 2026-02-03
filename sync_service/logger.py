@@ -1,185 +1,170 @@
 """
-Colorful logging configuration for the sync service.
+日志记录器模块 - 简化包装器 + Redis Stream 支持
 
-Provides colored console output with different colors for different log levels.
+基于Python标准logging模块的简化包装器，解决多实例问题。
+使用标准logging库的单例机制，提供简洁的接口。
+
+特性：
+- 基于Python标准logging模块，完全兼容生态系统
+- 真正的单例机制，避免重复处理器问题
+- 简洁的接口设计
+- 线程/进程安全
+- RedisStreamHandler：实时日志推送 + 历史回溯
+
+示例用法：
+    >>> from ..services.Logger import Logger
+    >>>
+    >>> # 创建日志记录器
+    >>> logger = Logger("myapp")
+    >>> logger.info("应用程序启动")
+    >>>
+    >>> # 带模块信息的日志
+    >>> logger.info("处理用户请求", module="api")
 """
 
+import json
 import logging
-import sys
 from typing import Optional
 
 
-# ANSI color codes
-class Colors:
-    """ANSI color codes for terminal output."""
-
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-
-    # Colors
-    BLACK = "\033[30m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
-
-    # Bright colors
-    BRIGHT_RED = "\033[91m"
-    BRIGHT_GREEN = "\033[92m"
-    BRIGHT_YELLOW = "\033[93m"
-    BRIGHT_BLUE = "\033[94m"
-    BRIGHT_MAGENTA = "\033[95m"
-    BRIGHT_CYAN = "\033[96m"
-    BRIGHT_WHITE = "\033[97m"
-
-    # Background colors
-    BG_BLACK = "\033[40m"
-    BG_RED = "\033[41m"
-    BG_GREEN = "\033[42m"
-    BG_YELLOW = "\033[43m"
-    BG_BLUE = "\033[44m"
-    BG_MAGENTA = "\033[45m"
-    BG_CYAN = "\033[46m"
-    BG_WHITE = "\033[47m"
-
-
-class ColoredFormatter(logging.Formatter):
+class RedisStreamHandler(logging.Handler):
     """
-    Custom log formatter with colors.
+    将日志流式传输到 Redis 的 Handler
 
-    Examples:
-        [INFO] 2024-01-01 12:00:00 - module_name - Message
-        [ERROR] 2024-01-01 12:00:00 - module_name - Error message
+    功能：
+    1. 实时推送：Redis Pub/Sub 用于前端实时订阅
+    2. 历史回溯：Redis List 存储最近 N 条日志
+    3. 动态路由：根据 log_module 字段（entity_id）分发到不同频道
+
+    Attributes:
+        redis: Redis 客户端实例
+        project_id: 项目 ID，用于 Hash Tag 构造
+        max_history: 历史日志最大条数
     """
-
-    # Log level colors
-    LEVEL_COLORS = {
-        logging.DEBUG: Colors.BRIGHT_BLUE,
-        logging.INFO: Colors.BRIGHT_GREEN,
-        logging.WARNING: Colors.BRIGHT_YELLOW,
-        logging.ERROR: Colors.BRIGHT_RED,
-        logging.CRITICAL: Colors.BG_RED + Colors.BRIGHT_WHITE,
-    }
-
-    # Log level names
-    LEVEL_NAMES = {
-        logging.DEBUG: "DEBUG",
-        logging.INFO: "INFO",
-        logging.WARNING: "WARN",
-        logging.ERROR: "ERROR",
-        logging.CRITICAL: "CRITICAL",
-    }
 
     def __init__(
         self,
-        fmt: Optional[str] = None,
-        datefmt: Optional[str] = None,
-        use_colors: bool = True,
+        redis_client,
+        project_id: str,
+        max_history: int = 100,
+        level: int = logging.INFO,
     ):
+        super().__init__(level=level)
+        self.redis = redis_client
+        self.project_id = project_id
+        self.max_history = max_history
+
+    def emit(self, record: logging.LogRecord) -> None:
         """
-        Initialize the colored formatter.
+        处理日志记录
 
         Args:
-            fmt: Log message format
-            datefmt: Date format
-            use_colors: Whether to use colors (disable for file logging)
+            record: logging.LogRecord，包含 log_module 字段作为 entity_id
         """
-        super().__init__(fmt=fmt, datefmt=datefmt)
-        self.use_colors = use_colors
+        try:
+            # 1. 获取 entity_id（从 log_module 字段）
+            entity_id = getattr(record, "log_module", record.name)
 
-    def format(self, record: logging.LogRecord) -> str:
-        """Format the log record with colors."""
-        if self.use_colors:
-            # Get color for this log level
-            level_color = self.LEVEL_COLORS.get(record.levelno, "")
-            level_name = self.LEVEL_NAMES.get(record.levelno, record.levelname)
-            reset = Colors.RESET
+            # 2. 构建日志 Payload
+            payload = {
+                "ts": record.created,
+                "level": record.levelname,
+                "entity_id": entity_id,
+                "logger_name": record.name,
+                "msg": self.format(record),
+                "module": record.module,
+                "line": record.lineno,
+            }
 
-            # Add color to level name
-            record.levelname = f"{level_color}[{level_name}]{reset}"
+            payload_str = json.dumps(payload, default=str, ensure_ascii=False)
 
-            # Add color to the module name
-            record.name = f"{Colors.CYAN}{record.name}{reset}"
+            # 3. 构建 Redis Keys（使用 Hash Tag）
+            pub_channel = f"logs:stream:{{p:{self.project_id}}}:{entity_id}"
+            history_key = f"logs:history:{{p:{self.project_id}}}:{entity_id}"
 
-            # Add bold to message
-            record.msg = f"{Colors.BOLD}{record.msg}{reset}"
+            # 4. 使用 Pipeline 执行原子操作
+            pipe = self.redis.pipeline(transaction=False)
+            pipe.publish(pub_channel, payload_str)
+            pipe.lpush(history_key, payload_str)
+            pipe.ltrim(history_key, 0, self.max_history - 1)
+            pipe.expire(history_key, 60 * 60 * 24)  # 24小时过期
+            pipe.execute()
 
-        return super().format(record)
+        except Exception:
+            # 不阻塞日志流程，只记录错误
+            self.handleError(record)
+
+    def close(self) -> None:
+        """关闭 Handler"""
+        try:
+            super().close()
+        except Exception:
+            pass
 
 
-def setup_logging(
-    level: str = "INFO",
-    log_file: Optional[str] = None,
-    format_string: Optional[str] = None,
-) -> None:
+class Logger:
     """
-    Setup logging with colored console output.
+    日志记录器类 - 简化包装器
 
-    Args:
-        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_file: Optional file path to also log to file (without colors)
-        format_string: Custom format string
+    提供简洁的日志接口，使用标准logging库的单例机制。
+
+    Attributes:
+        name (str): 日志记录器名称
+        _logger (logging.Logger): 底层标准日志记录器实例
+
+    Methods:
+        __init__: 初始化日志记录器
+        debug: 记录DEBUG级别日志
+        info: 记录INFO级别日志
+        warning: 记录WARNING级别日志
+        error: 记录ERROR级别日志
+        critical: 记录CRITICAL级别日志
     """
-    # Default format
-    if format_string is None:
-        format_string = "%(levelname)s %(asctime)s - %(name)s - %(message)s"
 
-    # Get log level
-    log_level = getattr(logging, level.upper(), logging.INFO)
+    def __init__(self, name: str):
+        """
+        初始化日志记录器
 
-    # Create root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+        Args:
+            name: 日志记录器名称，使用标准logging的单例机制
+        """
+        self.name = name
+        self._logger = logging.getLogger(name)
 
-    # Remove existing handlers
-    root_logger.handlers.clear()
+        # 如果没有全局配置，自动设置基本配置
+        if not logging.getLogger().handlers:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
 
-    # Console handler with colors
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(log_level)
-    console_formatter = ColoredFormatter(
-        fmt=format_string,
-        datefmt="%Y-%m-%d %H:%M:%S",
-        use_colors=True,
-    )
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
+    def _log_with_extra(
+        self,
+        level: int,
+        message: str,
+        module: Optional[str] = None,
+    ) -> None:
+        """内部方法：带 extra 字段记录日志"""
+        extra = {"log_module": module} if module else {}
+        self._logger.log(level, message, extra=extra)
 
-    # Optional: File handler without colors
-    if log_file:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setLevel(log_level)
-        file_formatter = ColoredFormatter(
-            fmt=format_string,
-            datefmt="%Y-%m-%d %H:%M:%S",
-            use_colors=False,  # No colors in file
-        )
-        file_handler.setFormatter(file_formatter)
-        root_logger.addHandler(file_handler)
+    def debug(self, message: str, module: Optional[str] = None) -> None:
+        """记录DEBUG级别日志"""
+        self._log_with_extra(logging.DEBUG, message, module)
 
+    def info(self, message: str, module: Optional[str] = None) -> None:
+        """记录INFO级别日志"""
+        self._log_with_extra(logging.INFO, message, module)
 
-def get_logger(name: str) -> logging.Logger:
-    """
-    Get a logger instance with the specified name.
+    def warning(self, message: str, module: Optional[str] = None) -> None:
+        """记录WARNING级别日志"""
+        self._log_with_extra(logging.WARNING, message, module)
 
-    Args:
-        name: Logger name (usually __name__)
+    def error(self, message: str, module: Optional[str] = None) -> None:
+        """记录ERROR级别日志"""
+        self._log_with_extra(logging.ERROR, message, module)
 
-    Returns:
-        Logger instance
-    """
-    return logging.getLogger(name)
-
-
-# Quick setup function
-def init_logger(level: str = "INFO") -> None:
-    """
-    Quick initialize logger with colored output.
-
-    Args:
-        level: Logging level
-    """
-    setup_logging(level=level)
+    def critical(self, message: str, module: Optional[str] = None) -> None:
+        """记录CRITICAL级别日志"""
+        self._log_with_extra(logging.CRITICAL, message, module)

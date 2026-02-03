@@ -148,9 +148,3 @@ class Config:
             sync=SyncConfig.from_dict({}),
             logging=LoggingConfig.from_dict({}),
         )
-
-    def setup_logging(self) -> None:
-        """Configure logging with colored output based on settings."""
-        from sync_service.logger import setup_logging
-
-        setup_logging(level=self.logging.level)

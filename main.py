@@ -26,11 +26,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from sync_service import Config, setup_logging, RedisClient, GitHubManager, ManifestValidator, AssetSyncService
+from sync_service import Config, setup_logging, Logger, RedisClient, GitHubManager, ManifestValidator, AssetSyncService
 
 # Setup colored logging
-setup_logging(level="INFO")
-logger = None  # Will be initialized after config loading
+setup_logging(level="INFO", use_colors=True)
+
+# Create logger
+logger = Logger(__name__)
 
 
 # ============================================================================
@@ -43,14 +45,6 @@ def load_config(config_path: str = None) -> Config:
         config = Config.from_yaml(config_path)
     else:
         config = Config.from_env()
-
-    # Setup logging with configured level
-    config.setup_logging()
-
-    # Re-import logger after setup
-    import logging
-    global logger
-    logger = logging.getLogger(__name__)
 
     if config_path and Path(config_path).exists():
         logger.info(f"Loading configuration from: {config_path}")
