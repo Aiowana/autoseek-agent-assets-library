@@ -56,18 +56,35 @@ class GitHubManager:
     - Scanning repository for manifest.yaml files
     - Fetching and parsing manifest content
     - Writing new/updated assets back to GitHub
+    - Rate limiting detection and handling
     """
 
-    def __init__(self, config: GitHubConfig, validator: Optional[ManifestValidator] = None):
+    # Rate limiting configuration
+    RATE_LIMIT_THRESHOLD = 100  # 剩余请求数低于此值时告警
+    RATE_LIMIT_SLEEP = 1  # 触发限流后的等待时间（秒）
+
+    def __init__(
+        self,
+        config: GitHubConfig,
+        validator: Optional[ManifestValidator] = None,
+        rate_limit_threshold: int = RATE_LIMIT_THRESHOLD,
+    ):
         """
         Initialize GitHub manager.
 
         Args:
             config: GitHub configuration
             validator: Optional manifest validator. Creates default if None.
+            rate_limit_threshold: 剩余请求数告警阈值
         """
         self.config = config
         self.validator = validator or ManifestValidator()
+        self.rate_limit_threshold = rate_limit_threshold
+
+        # Rate limiting state
+        self.rate_limit_remaining: int = 5000
+        self.rate_limit_reset: Optional[int] = None
+        self._last_rate_limit_check = 0
 
         # Initialize GitHub client
         self._client: Optional[Github] = None
@@ -92,6 +109,72 @@ class GitHubManager:
         return self._repo
 
     # ========================================================================
+    # Rate Limiting
+    # ========================================================================
+
+    def _check_rate_limit(self, response=None) -> None:
+        """
+        检查并更新 API 限流状态
+
+        Args:
+            response: GitHub API 响应对象（可选）
+        """
+        import time
+
+        try:
+            # 从响应头获取限流信息
+            if response and hasattr(response, "headers"):
+                remaining = response.headers.get("X-RateLimit-Remaining")
+                reset = response.headers.get("X-RateLimit-Reset")
+
+                if remaining:
+                    self.rate_limit_remaining = int(remaining)
+                if reset:
+                    self.rate_limit_reset = int(reset)
+
+            # 检查是否接近限流
+            if self.rate_limit_remaining < self.rate_limit_threshold:
+                logger.warning(
+                    f"GitHub API rate limit low: {self.rate_limit_remaining} remaining"
+                )
+
+            # 检查是否已触发限流
+            if self.rate_limit_remaining <= 0:
+                wait_time = 0
+                if self.rate_limit_reset:
+                    wait_time = max(0, self.rate_limit_reset - time.time())
+
+                if wait_time > 0:
+                    logger.warning(
+                        f"GitHub API rate limit exceeded, waiting {wait_time:.1f}s"
+                    )
+                    time.sleep(min(wait_time, self.RATE_LIMIT_SLEEP))
+                    self.rate_limit_remaining = 5000  # 重置后恢复
+
+        except Exception as e:
+            logger.debug(f"Failed to check rate limit: {e}")
+
+    def get_rate_limit_status(self) -> Dict[str, Any]:
+        """
+        获取当前限流状态
+
+        Returns:
+            包含限流信息的字典
+        """
+        import time
+
+        return {
+            "remaining": self.rate_limit_remaining,
+            "reset_at": self.rate_limit_reset,
+            "reset_in_seconds": (
+                max(0, self.rate_limit_reset - time.time())
+                if self.rate_limit_reset
+                else None
+            ),
+            "threshold": self.rate_limit_threshold,
+        }
+
+    # ========================================================================
     # Repository Scanning
     # ========================================================================
 
@@ -113,13 +196,16 @@ class GitHubManager:
         try:
             # Get all files with tree traversal
             contents = self.repo.get_contents(base_path) if base_path else self.repo.get_contents("")
+            self._check_rate_limit(contents)  # 检查限流状态
 
             while contents:
                 file_content = contents.pop(0)
 
                 if file_content.type == "dir":
                     # Recursively scan directory
-                    contents.extend(self.repo.get_contents(file_content.path))
+                    dir_contents = self.repo.get_contents(file_content.path)
+                    self._check_rate_limit(dir_contents)
+                    contents.extend(dir_contents)
 
                 elif self._is_manifest_file(file_content.name):
                     # Fetch and parse manifest file
@@ -225,6 +311,7 @@ class GitHubManager:
         manifest_data: Dict[str, Any],
         commit_message: str,
         target_path: Optional[str] = None,
+        sha: Optional[str] = None,
     ) -> Tuple[bool, str]:
         """
         Save or update a manifest file in GitHub.
@@ -234,6 +321,8 @@ class GitHubManager:
             manifest_data: Manifest data to write (will be serialized as YAML)
             commit_message: Git commit message
             target_path: Target path in repository. If None, uses default pattern.
+            sha: Expected SHA of the file (for conflict detection). If provided and
+                doesn't match, returns a conflict error.
 
         Returns:
             Tuple of (success, url_or_error_message)
@@ -256,6 +345,13 @@ class GitHubManager:
             try:
                 existing_file = self.repo.get_contents(target_path, ref=self.config.branch)
 
+                # 如果提供了 SHA，验证是否匹配
+                if sha is not None and existing_file.sha != sha:
+                    logger.warning(
+                        f"Conflict detected: expected SHA {sha}, got {existing_file.sha}"
+                    )
+                    return False, self._format_conflict_error(existing_file, sha)
+
                 # Update existing file
                 self.repo.update_file(
                     path=target_path,
@@ -269,6 +365,15 @@ class GitHubManager:
             except GithubException as e:
                 if e.status == 404:
                     # Create new file
+                    if sha is not None:
+                        # 提供了 SHA 但文件不存在，这是冲突
+                        logger.warning(f"Conflict: file not found but SHA was provided: {sha}")
+                        return False, {
+                            "error": "CONFLICT",
+                            "message": "文件已被删除或不存在",
+                            "expected_sha": sha,
+                        }
+
                     self.repo.create_file(
                         path=target_path,
                         message=commit_message,
@@ -276,6 +381,9 @@ class GitHubManager:
                         branch=self.config.branch,
                     )
                     logger.info(f"Created manifest in GitHub: {target_path}")
+                elif e.status == 409:
+                    # GitHub 报告冲突
+                    return False, self._format_conflict_error_from_exception(e)
                 else:
                     raise
 
@@ -283,6 +391,9 @@ class GitHubManager:
             return True, url
 
         except GithubException as e:
+            if e.status == 409:
+                return False, self._format_conflict_error_from_exception(e)
+
             error_msg = f"GitHub API error: {e}"
             logger.error(error_msg)
             return False, error_msg
@@ -290,6 +401,24 @@ class GitHubManager:
             error_msg = f"Unexpected error: {e}"
             logger.error(error_msg)
             return False, error_msg
+
+    def _format_conflict_error(self, existing_file, expected_sha: str) -> Dict[str, Any]:
+        """格式化冲突错误信息"""
+        return {
+            "error": "CONFLICT",
+            "message": "文件已被他人修改，请刷新后重试",
+            "file_path": existing_file.path,
+            "expected_sha": expected_sha,
+            "current_sha": existing_file.sha,
+        }
+
+    def _format_conflict_error_from_exception(self, exception: GithubException) -> Dict[str, Any]:
+        """从 GitHubException 格式化冲突错误"""
+        return {
+            "error": "CONFLICT",
+            "message": "文件已被他人修改，请刷新后重试",
+            "github_message": str(exception),
+        }
 
     def delete_from_github(
         self,

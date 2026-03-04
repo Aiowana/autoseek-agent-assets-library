@@ -114,6 +114,27 @@ class LoggingConfig:
 
 
 @dataclass
+class WebhookConfig:
+    """Webhook server configuration."""
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8080
+    secret: str = ""
+    workers: int = 1
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WebhookConfig":
+        return cls(
+            enabled=bool(data.get("enabled", os.getenv("WEBHOOK_ENABLED", "false").lower() == "true")),
+            host=data.get("host", os.getenv("WEBHOOK_HOST", "0.0.0.0")),
+            port=int(data.get("port", os.getenv("WEBHOOK_PORT", 8080))),
+            secret=data.get("secret", os.getenv("GITHUB_WEBHOOK_SECRET", "")),
+            workers=int(data.get("workers", os.getenv("WEBHOOK_WORKERS", 1))),
+        )
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -121,6 +142,7 @@ class Config:
     github: GitHubConfig
     sync: SyncConfig = field(default_factory=SyncConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    webhook: WebhookConfig = field(default_factory=WebhookConfig)
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":
@@ -137,6 +159,7 @@ class Config:
             github=GitHubConfig.from_dict(data.get("github", {})),
             sync=SyncConfig.from_dict(data.get("sync", {})),
             logging=LoggingConfig.from_dict(data.get("logging", {})),
+            webhook=WebhookConfig.from_dict(data.get("webhook", {})),
         )
 
     @classmethod
@@ -147,4 +170,5 @@ class Config:
             github=GitHubConfig.from_dict({}),
             sync=SyncConfig.from_dict({}),
             logging=LoggingConfig.from_dict({}),
+            webhook=WebhookConfig.from_dict({}),
         )

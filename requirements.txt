@@ -5,6 +5,10 @@ jsonschema>=4.20.0
 PyGithub>=2.1.1
 requests>=2.31.0
 
+# Webhook Server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
 # Development
 pydantic>=2.5.0
 python-dotenv>=1.0.0

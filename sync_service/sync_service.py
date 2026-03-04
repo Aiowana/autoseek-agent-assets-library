@@ -13,6 +13,8 @@ from sync_service.config import Config, SyncConfig
 from sync_service.github_manager import GitHubManager, Asset
 from sync_service.models import StoredAsset
 from sync_service.redis_client import RedisClient
+from sync_service.lock import DistributedLock, LockTimeoutError
+from sync_service.retry_queue import SyncRetryQueue, create_retry_queue
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,7 @@ class AssetSyncService:
         self.config = config
         self.redis = redis_client
         self.github = github_manager
+        self.retry_queue = create_retry_queue(redis_client)
 
     # ========================================================================
     # Read Sync (GitHub → Redis)
@@ -94,6 +97,7 @@ class AssetSyncService:
     def sync_from_github(
         self,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        use_lock: bool = True,
     ) -> SyncStats:
         """
         Synchronize assets from GitHub to Redis.
@@ -101,6 +105,7 @@ class AssetSyncService:
         Args:
             progress_callback: Optional callback for progress updates
                 Args: (current_description, current_count, total_count)
+            use_lock: 是否使用分布式锁（默认 True）
 
         Returns:
             SyncStats with operation results
@@ -108,6 +113,31 @@ class AssetSyncService:
         import time
 
         stats = SyncStats(start_time=time.time())
+
+        # 获取分布式锁
+        lock = None
+        if use_lock:
+            lock = DistributedLock(self.redis.client, "global", timeout=60)
+            if not lock.acquire():
+                logger.warning("Sync already in progress, skipping")
+                stats.end_time = time.time()
+                stats.skipped = True
+                stats.errors.append("Sync already in progress")
+                return stats
+
+        try:
+            return self._do_sync_from_github(stats, progress_callback)
+        finally:
+            if lock:
+                lock.release()
+
+    def _do_sync_from_github(
+        self,
+        stats: SyncStats,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> SyncStats:
+        """内部同步方法（不处理锁）"""
+        import time
 
         # Get current commit SHA before syncing
         current_commit_sha = self.github.get_latest_commit_sha()

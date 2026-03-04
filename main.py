@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 
 from sync_service import Config, setup_logging, Logger, RedisClient, GitHubManager, ManifestValidator, AssetSyncService
+from sync_service.webhook.server import create_app
+from sync_service.webhook.handler import create_handler
 
 # Setup colored logging
 setup_logging(level="INFO", use_colors=True)
@@ -218,6 +220,46 @@ def cmd_index(args, config: Config):
     return 0
 
 
+def cmd_serve(args, config: Config):
+    """Start the Webhook server."""
+    # 初始化同步服务
+    sync_service_instance = initialize_service(config)
+
+    # 创建 FastAPI 应用
+    app = create_app(config)
+
+    # 创建并设置处理器
+    handler = create_handler(sync_service_instance, target_branch=config.github.branch)
+
+    # 将处理器设置到全局（hacky but works for now）
+    import sync_service.webhook.server as webhook_server
+    webhook_server.set_handler(handler)
+
+    # 启动服务器
+    import uvicorn
+
+    host = args.host or config.webhook.host
+    port = args.port or config.webhook.port
+
+    logger.info(f"Starting webhook server on {host}:{port}")
+    logger.info(f"Target branch: {config.github.branch}")
+    logger.info(f"Signature verification: {'enabled' if config.webhook.secret else 'disabled'}")
+
+    try:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="info",
+        )
+    except KeyboardInterrupt:
+        logger.info("Webhook server stopped by user")
+        return 0
+    except Exception as e:
+        logger.error(f"Webhook server error: {e}", exc_info=True)
+        return 1
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -279,6 +321,19 @@ def main():
         help="Output as JSON",
     )
 
+    # Serve command
+    serve_parser = subparsers.add_parser("serve", help="Start webhook server")
+    serve_parser.add_argument(
+        "--host",
+        type=str,
+        help=f"Host to bind to (default: from config or 0.0.0.0)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        help=f"Port to bind to (default: from config or 8080)",
+    )
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -300,6 +355,7 @@ def main():
         "list": cmd_list,
         "get": cmd_get,
         "index": cmd_index,
+        "serve": cmd_serve,
     }
 
     handler = command_handlers.get(args.command)
