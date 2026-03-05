@@ -25,24 +25,57 @@ logger = logging.getLogger(__name__)
 class RedisKeys:
     """Redis key templates following the naming convention."""
 
-    # Asset metadata: asset:metadata:{id}
-    METADATA = "asset:metadata:{}"
+    def __init__(self, namespace: Optional[str] = None):
+        """
+        Initialize Redis key templates with optional namespace.
 
-    # Category index: asset:category:{category}
-    CATEGORY = "asset:category:{}"
+        Args:
+            namespace: 租户命名空间，如 "default", "proj_alpha" 等
+        """
+        self.namespace = namespace or "default"
 
-    # Global index: asset:index (lightweight asset summary)
-    GLOBAL_INDEX = "asset:index"
+    # Asset metadata: asset:{namespace}:metadata:{id}
+    def metadata_key(self, asset_id: str) -> str:
+        return f"asset:{self.namespace}:metadata:{asset_id}"
 
-    # Sync state: asset:sync:state
-    SYNC_STATE = "asset:sync:state"
+    # Category index: asset:{namespace}:category:{category}
+    def category_key(self, category: str) -> str:
+        return f"asset:{self.namespace}:category:{category}"
 
-    # Changed queue: asset:sync:changed
-    SYNC_CHANGED = "asset:sync:changed"
+    # Global index: asset:{namespace}:index (lightweight asset summary)
+    @property
+    def global_index(self) -> str:
+        return f"asset:{self.namespace}:index"
 
-    @classmethod
-    def metadata_key(cls, asset_id: str) -> str:
-        return cls.METADATA.format(asset_id)
+    # Sync state: asset:{namespace}:sync:state
+    @property
+    def sync_state(self) -> str:
+        return f"asset:{self.namespace}:sync:state"
+
+    # Changed queue: asset:{namespace}:sync:changed
+    @property
+    def sync_changed(self) -> str:
+        return f"asset:{self.namespace}:sync:changed"
+
+    # Lock key: asset:{namespace}:sync:lock
+    @property
+    def lock_key(self) -> str:
+        return f"asset:{self.namespace}:sync:lock"
+
+    # Log stream: logs:stream:{namespace}
+    @property
+    def log_stream(self) -> str:
+        return f"logs:stream:{self.namespace}"
+
+    # Pattern for scanning all metadata keys
+    @property
+    def metadata_pattern(self) -> str:
+        return f"asset:{self.namespace}:metadata:*"
+
+    # Get the redis prefix for this namespace
+    @property
+    def prefix(self) -> str:
+        return f"asset:{self.namespace}"
 
     @classmethod
     def category_key(cls, category: str) -> str:
@@ -79,17 +112,33 @@ class RedisClient:
     Redis client wrapper for asset storage operations.
 
     Implements all Redis operations following the key naming convention.
+    Supports multi-tenant isolation through namespace prefixes.
     """
 
-    def __init__(self, config: RedisConfig):
+    def __init__(self, config: RedisConfig, namespace: str = "default"):
         """
         Initialize Redis client.
 
         Args:
             config: Redis configuration
+            namespace: 租户命名空间 (默认: "default")
         """
         self.config = config
+        self.namespace = namespace
+        self._keys = RedisKeys(namespace)
         self._client: Optional[Redis] = None
+
+    def with_namespace(self, namespace: str) -> "RedisClient":
+        """
+        创建一个新的 RedisClient 实例，使用不同的命名空间
+
+        Args:
+            namespace: 新的命名空间
+
+        Returns:
+            新的 RedisClient 实例
+        """
+        return RedisClient(self.config, namespace)
 
     @property
     def client(self) -> Redis:
@@ -122,7 +171,7 @@ class RedisClient:
         Returns:
             True if successful
         """
-        key = RedisKeys.metadata_key(asset.id)
+        key = self._keys.metadata_key(asset.id)
         data = RedisKeys.make_hash(asset)
 
         client = pipeline or self.client
@@ -145,7 +194,7 @@ class RedisClient:
         Returns:
             StoredAsset if found, None otherwise
         """
-        key = RedisKeys.metadata_key(asset_id)
+        key = self._keys.metadata_key(asset_id)
 
         try:
             data = self.client.hgetall(key)
@@ -167,7 +216,7 @@ class RedisClient:
         Returns:
             True if successful
         """
-        key = RedisKeys.metadata_key(asset_id)
+        key = self._keys.metadata_key(asset_id)
         client = pipeline or self.client
 
         try:
@@ -185,7 +234,7 @@ class RedisClient:
         Returns:
             List of all StoredAsset objects
         """
-        pattern = RedisKeys.METADATA.replace("{}", "*")
+        pattern = self._keys.metadata_pattern
         assets = []
 
         try:
@@ -214,7 +263,7 @@ class RedisClient:
         Returns:
             True if successful
         """
-        key = RedisKeys.category_key(category)
+        key = self._keys.category_key(category)
         client = pipeline or self.client
 
         try:
@@ -237,7 +286,7 @@ class RedisClient:
         Returns:
             True if successful
         """
-        key = RedisKeys.category_key(category)
+        key = self._keys.category_key(category)
         client = pipeline or self.client
 
         try:
@@ -258,7 +307,7 @@ class RedisClient:
         Returns:
             List of asset IDs
         """
-        key = RedisKeys.category_key(category)
+        key = self._keys.category_key(category)
 
         try:
             members = self.client.smembers(key)
@@ -364,7 +413,7 @@ class RedisClient:
         index_entry = RedisKeys.make_index_entry(asset)
 
         try:
-            client.hset(RedisKeys.GLOBAL_INDEX, asset.id, index_entry)
+            client.hset(self._keys.global_index, asset.id, index_entry)
             logger.debug(f"Updated global index for: {asset.id}")
             return True
         except redis.RedisError as e:
@@ -385,7 +434,7 @@ class RedisClient:
         client = pipeline or self.client
 
         try:
-            client.hdel(RedisKeys.GLOBAL_INDEX, asset_id)
+            client.hdel(self._keys.global_index, asset_id)
             logger.debug(f"Removed {asset_id} from global index")
             return True
         except redis.RedisError as e:
@@ -403,7 +452,7 @@ class RedisClient:
             }
         """
         try:
-            data = self.client.hgetall(RedisKeys.GLOBAL_INDEX)
+            data = self.client.hgetall(self._keys.global_index)
             return {k: json.loads(v) for k, v in data.items()}
         except redis.RedisError as e:
             logger.error(f"Failed to get global index: {e}")
@@ -420,7 +469,7 @@ class RedisClient:
             List of asset IDs
         """
         try:
-            return list(self.client.hkeys(RedisKeys.GLOBAL_INDEX))
+            return list(self.client.hkeys(self._keys.global_index))
         except redis.RedisError as e:
             logger.error(f"Failed to get asset IDs from global index: {e}")
             return []
@@ -432,7 +481,7 @@ class RedisClient:
     def get_sync_state(self) -> Dict[str, Any]:
         """Get current sync state."""
         try:
-            data = self.client.hgetall(RedisKeys.SYNC_STATE)
+            data = self.client.hgetall(self._keys.sync_state)
             return data if data else {}
         except redis.RedisError as e:
             logger.error(f"Failed to get sync state: {e}")
@@ -449,7 +498,7 @@ class RedisClient:
             True if successful
         """
         try:
-            self.client.hset(RedisKeys.SYNC_STATE, mapping=kwargs)
+            self.client.hset(self._keys.sync_state, mapping=kwargs)
             return True
         except redis.RedisError as e:
             logger.error(f"Failed to set sync state: {e}")
@@ -512,7 +561,7 @@ class RedisClient:
     def add_changed_asset(self, asset_id: str) -> bool:
         """Add asset ID to changed queue."""
         try:
-            self.client.rpush(RedisKeys.SYNC_CHANGED, asset_id)
+            self.client.rpush(self._keys.sync_changed, asset_id)
             return True
         except redis.RedisError as e:
             logger.error(f"Failed to add changed asset {asset_id}: {e}")
@@ -529,7 +578,7 @@ class RedisClient:
             List of asset IDs
         """
         try:
-            items = self.client.lrange(RedisKeys.SYNC_CHANGED, -count, -1)
+            items = self.client.lrange(self._keys.sync_changed, -count, -1)
             return list(reversed(items))  # Most recent first
         except redis.RedisError as e:
             logger.error(f"Failed to get changed assets: {e}")
@@ -546,7 +595,7 @@ class RedisClient:
             True if successful
         """
         try:
-            self.client.ltrim(RedisKeys.SYNC_CHANGED, -keep, -1)
+            self.client.ltrim(self._keys.sync_changed, -keep, -1)
             return True
         except redis.RedisError as e:
             logger.error(f"Failed to trim changed assets: {e}")

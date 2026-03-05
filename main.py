@@ -29,6 +29,8 @@ from pathlib import Path
 from sync_service import Config, setup_logging, Logger, RedisClient, GitHubManager, ManifestValidator, AssetSyncService
 from sync_service.webhook.server import create_app
 from sync_service.webhook.handler import create_handler
+from sync_service.tenant import TenantManager, TenantConfig, get_tenant_manager, init_tenant_manager
+from sync_service.webhook.multi_tenant_server import create_multi_tenant_app
 
 # Setup colored logging
 setup_logging(level="INFO", use_colors=True)
@@ -56,9 +58,30 @@ def load_config(config_path: str = None) -> Config:
     return config
 
 
-def initialize_service(config: Config) -> AssetSyncService:
-    """Initialize the sync service with all dependencies."""
-    redis_client = RedisClient(config.redis)
+def load_tenants(tenants_config_path: str = None) -> TenantManager:
+    """Load tenant configuration from file."""
+    if tenants_config_path and Path(tenants_config_path).exists():
+        return init_tenant_manager(tenants_config_path)
+    else:
+        # 尝试默认路径
+        default_paths = ["tenants.yaml", "config/tenants.yaml"]
+        for path in default_paths:
+            if Path(path).exists():
+                logger.info(f"Loading tenant configuration from: {path}")
+                return init_tenant_manager(path)
+        logger.info("No tenant configuration found, using empty tenant manager")
+        return get_tenant_manager()
+
+
+def initialize_service(config: Config, namespace: str = "default") -> AssetSyncService:
+    """
+    Initialize the sync service with all dependencies.
+
+    Args:
+        config: Application configuration
+        namespace: 租户命名空间 (默认: "default")
+    """
+    redis_client = RedisClient(config.redis, namespace=namespace)
     validator = ManifestValidator()
     github_manager = GitHubManager(config.github, validator)
     sync_service = AssetSyncService(config, redis_client, github_manager)
@@ -72,7 +95,78 @@ def initialize_service(config: Config) -> AssetSyncService:
 
 def cmd_sync(args, config: Config):
     """Execute sync from GitHub to Redis."""
-    service = initialize_service(config)
+    tenant_manager = load_tenants(args.tenants_config)
+
+    # 检查是否是多租户模式
+    if args.all:
+        # 同步所有启用的租户
+        tenants = tenant_manager.list_tenants(enabled_only=True)
+        if not tenants:
+            logger.warning("No enabled tenants found")
+            return 1
+
+        logger.info(f"Syncing {len(tenants)} tenants")
+
+        total_created = 0
+        total_updated = 0
+        total_deleted = 0
+        total_failed = 0
+
+        for tenant in tenants:
+            logger.info(f"Syncing tenant: {tenant.namespace} ({tenant.name})")
+            try:
+                # 为每个租户创建服务
+                tenant_config = tenant_manager.get_tenant(tenant.namespace)
+                sync_service = _create_service_for_tenant(config, tenant_config)
+
+                stats = sync_service.sync_from_github(
+                    progress_callback=None,
+                    use_lock=True,
+                )
+
+                total_created += stats.created
+                total_updated += stats.updated
+                total_deleted += stats.deleted
+                total_failed += stats.failed
+
+                logger.info(
+                    f"  Tenant {tenant.namespace}: {stats.created} created, "
+                    f"{stats.updated} updated, {stats.deleted} deleted"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to sync tenant {tenant.namespace}: {e}")
+                total_failed += 1
+
+        logger.info("=" * 50)
+        logger.info("Overall Sync Summary")
+        logger.info("=" * 50)
+        logger.info(f"Total created: {total_created}")
+        logger.info(f"Total updated: {total_updated}")
+        logger.info(f"Total deleted: {total_deleted}")
+        logger.info(f"Total failed: {total_failed}")
+
+        return 0 if total_failed == 0 else 1
+
+    elif args.tenant:
+        # 同步指定租户
+        tenant = tenant_manager.get_tenant(args.tenant)
+        if not tenant:
+            logger.error(f"Tenant not found: {args.tenant}")
+            return 1
+
+        if not tenant.enabled:
+            logger.error(f"Tenant disabled: {args.tenant}")
+            return 1
+
+        logger.info(f"Syncing tenant: {tenant.namespace} ({tenant.name})")
+        service = _create_service_for_tenant(config, tenant)
+        namespace = tenant.namespace
+
+    else:
+        # 单租户模式（默认）
+        service = initialize_service(config)
+        namespace = "default"
 
     logger.info("=" * 50)
     logger.info("Starting sync from GitHub to Redis")
@@ -94,6 +188,7 @@ def cmd_sync(args, config: Config):
         logger.info("=" * 50)
         logger.info("Sync Summary")
         logger.info("=" * 50)
+        logger.info(f"Namespace: {namespace}")
         logger.info(f"Duration: {stats.duration_seconds:.2f}s")
 
         if getattr(stats, 'skipped', False):
@@ -115,6 +210,32 @@ def cmd_sync(args, config: Config):
     except Exception as e:
         logger.error(f"Sync failed: {e}", exc_info=True)
         return 1
+
+
+def _create_service_for_tenant(config: Config, tenant: TenantConfig) -> AssetSyncService:
+    """
+    为指定租户创建同步服务
+
+    Args:
+        config: 基础配置
+        tenant: 租户配置
+
+    Returns:
+        AssetSyncService 实例
+    """
+    from sync_service.config import GitHubConfig
+
+    redis_client = RedisClient(config.redis, namespace=tenant.namespace)
+    validator = ManifestValidator()
+
+    github_config = GitHubConfig(
+        token=tenant.git_token,
+        repo=tenant.git_repo,
+        branch=tenant.git_branch,
+    )
+    github_manager = GitHubManager(github_config, validator)
+
+    return AssetSyncService(config, redis_client, github_manager)
 
 
 def cmd_continuous(args, config: Config):
@@ -222,18 +343,25 @@ def cmd_index(args, config: Config):
 
 def cmd_serve(args, config: Config):
     """Start the Webhook server."""
-    # 初始化同步服务
-    sync_service_instance = initialize_service(config)
+    # 加载租户管理器
+    tenant_manager = load_tenants(args.tenants_config)
 
-    # 创建 FastAPI 应用
-    app = create_app(config)
+    # 检查是否使用多租户模式
+    if args.multi_tenant:
+        # 多租户模式
+        app = create_multi_tenant_app(config, tenant_manager)
 
-    # 创建并设置处理器
-    handler = create_handler(sync_service_instance, target_branch=config.github.branch)
+        status = tenant_manager.get_status()
+        logger.info(f"Starting multi-tenant webhook server with {status['enabled_tenants']} tenants")
+    else:
+        # 单租户模式
+        sync_service_instance = initialize_service(config)
+        app = create_app(config)
+        handler = create_handler(sync_service_instance, target_branch=config.github.branch)
 
-    # 将处理器设置到全局（hacky but works for now）
-    import sync_service.webhook.server as webhook_server
-    webhook_server.set_handler(handler)
+        import sync_service.webhook.server as webhook_server
+        webhook_server.set_handler(handler)
+        logger.info("Starting single-tenant webhook server")
 
     # 启动服务器
     import uvicorn
@@ -242,7 +370,7 @@ def cmd_serve(args, config: Config):
     port = args.port or config.webhook.port
 
     logger.info(f"Starting webhook server on {host}:{port}")
-    logger.info(f"Target branch: {config.github.branch}")
+    logger.info(f"Multi-tenant mode: {args.multi_tenant}")
     logger.info(f"Signature verification: {'enabled' if config.webhook.secret else 'disabled'}")
 
     try:
@@ -260,6 +388,138 @@ def cmd_serve(args, config: Config):
         return 1
 
 
+def cmd_tenants(args, config: Config):
+    """List all tenants."""
+    tenant_manager = load_tenants(args.tenants_config)
+    tenants = tenant_manager.list_tenants(enabled_only=not args.all)
+
+    if not tenants:
+        logger.info("No tenants found")
+        return 0
+
+    logger.info(f"Tenants ({len(tenants)}):")
+    print("-" * 60)
+    for tenant in tenants:
+        status = "enabled" if tenant.enabled else "disabled"
+        print(f"  {tenant.namespace:30} {tenant.name:20} [{status}]")
+        print(f"    Platform: {tenant.git_platform}")
+        print(f"    Repo: {tenant.git_repo}")
+        print(f"    Branch: {tenant.git_branch}")
+        print(f"    Webhook: {tenant.get_webhook_path()}")
+        print()
+
+    return 0
+
+
+def cmd_tenant_add(args, config: Config):
+    """Add a new tenant."""
+    tenant_manager = load_tenants(args.tenants_config)
+
+    # 检查命名空间格式
+    if not tenant_manager.validate_namespace(args.namespace):
+        logger.error(f"Invalid namespace format: {args.namespace}")
+        logger.error("Namespace must start with proj_, user_, org_, or env_ and contain only lowercase letters, numbers, and underscores")
+        return 1
+
+    # 检查是否已存在
+    if tenant_manager.get_tenant(args.namespace):
+        logger.error(f"Tenant already exists: {args.namespace}")
+        return 1
+
+    # 获取环境变量中的敏感信息
+    import os
+    git_token = os.getenv(args.git_token) if args.git_token else ""
+    webhook_secret = os.getenv(args.webhook_secret) if args.webhook_secret else ""
+
+    if not git_token:
+        logger.error(f"Git token not found (env var: {args.git_token})")
+        return 1
+
+    # 创建租户配置
+    tenant = TenantConfig(
+        namespace=args.namespace,
+        name=args.name,
+        git_platform=args.platform,
+        git_token=git_token,
+        git_repo=args.repo,
+        git_branch=args.branch,
+        webhook_secret=webhook_secret,
+        enabled=True,
+    )
+
+    # 添加租户
+    if tenant_manager.add_tenant(tenant):
+        logger.info(f"Added tenant: {tenant.namespace} ({tenant.name})")
+
+        # 保存到配置文件
+        if args.save:
+            _save_tenants_to_file(tenant_manager, args.tenants_config)
+            logger.info(f"Saved tenant configuration to: {args.tenants_config}")
+
+        return 0
+    else:
+        logger.error(f"Failed to add tenant: {args.namespace}")
+        return 1
+
+
+def cmd_tenant_remove(args, config: Config):
+    """Remove a tenant."""
+    tenant_manager = load_tenants(args.tenants_config)
+
+    if not tenant_manager.get_tenant(args.namespace):
+        logger.error(f"Tenant not found: {args.namespace}")
+        return 1
+
+    # 确认删除
+    if not args.force:
+        response = input(f"Are you sure you want to remove tenant '{args.namespace}'? (y/N): ")
+        if response.lower() != 'y':
+            logger.info("Cancelled")
+            return 0
+
+    if tenant_manager.remove_tenant(args.namespace):
+        logger.info(f"Removed tenant: {args.namespace}")
+
+        # 保存到配置文件
+        if args.save:
+            _save_tenants_to_file(tenant_manager, args.tenants_config)
+            logger.info(f"Updated tenant configuration in: {args.tenants_config}")
+
+        return 0
+    else:
+        logger.error(f"Failed to remove tenant: {args.namespace}")
+        return 1
+
+
+def _save_tenants_to_file(tenant_manager: TenantManager, config_path: str):
+    """保存租户配置到文件"""
+    import yaml
+    from pathlib import Path
+
+    tenants = tenant_manager.list_tenants()
+    data = {
+        "tenants": [
+            {
+                "namespace": t.namespace,
+                "name": t.name,
+                "git_platform": t.git_platform,
+                "git_token": f"${{{t.namespace.upper()}_GITHUB_TOKEN}}",
+                "git_repo": t.git_repo,
+                "git_branch": t.git_branch,
+                "webhook_secret": f"${{{t.namespace.upper()}_WEBHOOK_SECRET}}",
+                "enabled": t.enabled,
+            }
+            for t in tenants
+        ]
+    }
+
+    config_file = Path(config_path)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(config_file, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -275,6 +535,12 @@ def main():
         type=str,
         default="settings.yaml",
         help="Path to configuration file (default: settings.yaml)",
+    )
+    parser.add_argument(
+        "--tenants-config", "-t",
+        type=str,
+        default="tenants.yaml",
+        help="Path to tenants configuration file (default: tenants.yaml)",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -295,6 +561,16 @@ def main():
         "--continuous",
         action="store_true",
         help="Run continuous sync with polling",
+    )
+    sync_parser.add_argument(
+        "--tenant", "-n",
+        type=str,
+        help="Sync specific tenant by namespace",
+    )
+    sync_parser.add_argument(
+        "--all", "-a",
+        action="store_true",
+        help="Sync all enabled tenants",
     )
 
     # Health command
@@ -333,6 +609,36 @@ def main():
         type=int,
         help=f"Port to bind to (default: from config or 8080)",
     )
+    serve_parser.add_argument(
+        "--multi-tenant", "-m",
+        action="store_true",
+        help="Enable multi-tenant mode",
+    )
+
+    # Tenants command
+    tenants_parser = subparsers.add_parser("tenants", help="List all tenants")
+    tenants_parser.add_argument(
+        "--all", "-a",
+        action="store_true",
+        help="List all tenants including disabled ones",
+    )
+
+    # Tenant add command
+    tenant_add_parser = subparsers.add_parser("tenant-add", help="Add a new tenant")
+    tenant_add_parser.add_argument("namespace", type=str, help="Tenant namespace (e.g., proj_alpha)")
+    tenant_add_parser.add_argument("name", type=str, help="Tenant name")
+    tenant_add_parser.add_argument("--platform", type=str, default="github", choices=["github", "gitee"], help="Git platform")
+    tenant_add_parser.add_argument("--repo", type=str, required=True, help="Repository (owner/repo)")
+    tenant_add_parser.add_argument("--branch", type=str, default="main", help="Branch name")
+    tenant_add_parser.add_argument("--git-token", type=str, required=True, help="Environment variable name for Git token")
+    tenant_add_parser.add_argument("--webhook-secret", type=str, default="", help="Environment variable name for webhook secret")
+    tenant_add_parser.add_argument("--save", action="store_true", help="Save to tenants configuration file")
+
+    # Tenant remove command
+    tenant_remove_parser = subparsers.add_parser("tenant-remove", help="Remove a tenant")
+    tenant_remove_parser.add_argument("namespace", type=str, help="Tenant namespace")
+    tenant_remove_parser.add_argument("--force", "-f", action="store_true", help="Skip confirmation")
+    tenant_remove_parser.add_argument("--save", action="store_true", help="Update tenants configuration file")
 
     # Parse arguments
     args = parser.parse_args()
@@ -356,6 +662,9 @@ def main():
         "get": cmd_get,
         "index": cmd_index,
         "serve": cmd_serve,
+        "tenants": cmd_tenants,
+        "tenant-add": cmd_tenant_add,
+        "tenant-remove": cmd_tenant_remove,
     }
 
     handler = command_handlers.get(args.command)

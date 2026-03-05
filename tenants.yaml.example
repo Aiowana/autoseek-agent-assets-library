@@ -1,0 +1,97 @@
+# 多租户配置文件示例
+#
+# 此文件定义了所有租户的配置信息，每个租户拥有独立的 Git 仓库和 Redis 命名空间。
+#
+# 使用方法：
+# 1. 复制此文件为 tenants.yaml
+# 2. 为每个租户设置环境变量（GITHUB_TOKEN, WEBHOOK_SECRET 等）
+# 3. 运行: python main.py sync --all
+
+tenants:
+  # 默认租户（用于向后兼容）
+  - namespace: "default"
+    name: "默认租户"
+    git_platform: "github"
+    git_token: "${GITHUB_TOKEN}"
+    git_repo: "Aiowana/autoseek-agent-assets-library"
+    git_branch: "main"
+    webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
+    enabled: true
+
+  # 项目 Alpha 示例
+  - namespace: "proj_alpha"
+    name: "Alpha 项目资产库"
+    git_platform: "github"
+    git_token: "${PROJ_ALPHA_GITHUB_TOKEN}"
+    git_repo: "alpha-team/agent-assets"
+    git_branch: "main"
+    webhook_secret: "${PROJ_ALPHA_WEBHOOK_SECRET}"
+    enabled: true
+
+  # 项目 Beta 示例
+  - namespace: "proj_beta"
+    name: "Beta 项目资产库"
+    git_platform: "github"
+    git_token: "${PROJ_BETA_GITHUB_TOKEN}"
+    git_repo: "beta-company/agent-assets"
+    git_branch: "main"
+    webhook_secret: "${PROJ_BETA_WEBHOOK_SECRET}"
+    enabled: true
+
+  # 用户 Alice 示例
+  - namespace: "user_alice"
+    name: "Alice 的个人资产库"
+    git_platform: "github"
+    git_token: "${USER_ALICE_GITHUB_TOKEN}"
+    git_repo: "alice/agent-assets"
+    git_branch: "main"
+    webhook_secret: "${USER_ALICE_WEBHOOK_SECRET}"
+    enabled: true
+
+  # Gitee 平台示例
+  - namespace: "proj_gitee_demo"
+    name: "Gitee 演示项目"
+    git_platform: "gitee"
+    git_token: "${GITEE_TOKEN}"
+    git_repo: "owner/repo"
+    git_branch: "master"
+    webhook_secret: "${GITEE_WEBHOOK_SECRET}"
+    enabled: false  # 默认禁用
+
+# ============================================================================
+# 命名空间命名规范
+# ============================================================================
+#
+# 前缀     | 用途       | 示例
+# --------|----------|----------------------
+# proj_   | 项目级     | proj_alpha, proj_beta
+# user_   | 用户级     | user_alice, user_bob
+# org_    | 组织级     | org_acme, org_startup
+# env_    | 环境级     | env_prod, env_staging
+# system_ | 系统级     | system_global (只读)
+#
+# ============================================================================
+# 环境变量设置
+# ============================================================================
+#
+# 对于每个租户，需要设置以下环境变量：
+#
+# export PROJ_ALPHA_GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
+# export PROJ_ALPHA_WEBHOOK_SECRET="your-webhook-secret"
+#
+# ============================================================================
+# Webhook 配置
+# ============================================================================
+#
+# 对于每个租户，在 GitHub/Gitee 仓库中配置 Webhook：
+#
+# GitHub:
+#   URL: https://your-domain.com/webhook/github/proj_alpha
+#   Content type: application/json
+#   Secret: <webhook_secret>
+#   Events: Pushes
+#
+# Gitee:
+#   URL: https://your-domain.com/webhook/gitee/proj_gitee_demo
+#   Password: <webhook_secret>
+#   Events: Push

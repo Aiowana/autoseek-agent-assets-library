@@ -108,6 +108,27 @@ class GitHubManager:
             logger.info(f"Accessed repository: {self.config.repo}")
         return self._repo
 
+    def with_config(self, token: str, repo: str, branch: str = "main") -> "GitHubManager":
+        """
+        创建一个新的 GitHubManager 实例，使用不同的配置
+
+        Args:
+            token: GitHub 访问令牌
+            repo: 仓库地址 (owner/repo)
+            branch: 分支名 (默认: "main")
+
+        Returns:
+            新的 GitHubManager 实例
+        """
+        from sync_service.config import GitHubConfig
+
+        new_config = GitHubConfig(
+            token=token,
+            repo=repo,
+            branch=branch,
+        )
+        return GitHubManager(new_config, self.validator, self.rate_limit_threshold)
+
     # ========================================================================
     # Rate Limiting
     # ========================================================================
