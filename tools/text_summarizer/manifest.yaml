@@ -1,0 +1,5 @@
+name: text_summarizer
+version: "1.0"
+category: tool
+description: 文本摘要工具，支持多种摘要模式和长度控制
+entry: text_summarizer.py
