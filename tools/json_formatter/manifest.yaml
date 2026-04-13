@@ -1,0 +1,5 @@
+name: json_formatter
+version: "1.0"
+category: tool
+description: JSON字符串格式化工具
+entry: json_formatter.py
