@@ -1,0 +1,5 @@
+name: data_validator
+version: "1.0"
+category: tool
+description: 数据验证工具，包含邮箱验证和手机号验证功能
+entry: data_validator.py
