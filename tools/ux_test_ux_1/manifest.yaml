@@ -1,0 +1,5 @@
+name: ux_test_ux_1
+version: '1.0'
+category: tool
+entry: main.py
+main_file: main.py
