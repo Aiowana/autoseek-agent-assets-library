@@ -33,6 +33,4 @@ async def json_formatter(
         }
         
         return ToolResult.success(
-            text=f"✅ JSON格式化成功
-
-**格式化后的JSON：**
+            text=f"✅ JSON格式化成功\n\n**格式化后的JSON：**\n
