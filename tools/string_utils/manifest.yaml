@@ -1,0 +1,6 @@
+name: string_utils
+version: '1.0'
+category: tool
+description: 字符串工具集
+entry: string_utils.py
+main_file: string_utils.py
